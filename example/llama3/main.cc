@@ -31,6 +31,8 @@
 #include "infini_train/include/profiler.h"
 #endif
 
+#include "infini_train/include/checkpoint.h"
+
 #include "example/common/tiny_shakespeare_dataset.h"
 #include "example/common/tokenizer.h"
 #include "example/llama3/net.h"
@@ -76,6 +78,10 @@ DEFINE_string(dtype, "float32", "precision used in training (float32/bfloat16)")
 DEFINE_string(
     precision_check, "",
     "precision check config: level=N,format=simple|table,output_md5=true|false,output_path=PATH,baseline=PATH");
+// checkpoint
+DEFINE_string(save_ckpt_dir, "", "directory to save checkpoints (empty = disabled)");
+DEFINE_int32(save_ckpt_every, 0, "save a checkpoint every N steps (0 = disabled)");
+DEFINE_string(load_ckpt_path, "", "path to a .ckpt file to resume training from");
 
 using namespace infini_train;
 
@@ -255,7 +261,17 @@ void Train(const nn::parallel::Rank &rank) {
 
     auto impl = core::GetDeviceGuardImpl(device.type());
 
-    for (int step = 0; step < FLAGS_num_iteration + 1; ++step) {
+    // Resume from checkpoint if requested (all ranks load)
+    int start_step = 0;
+    if (!FLAGS_load_ckpt_path.empty()) {
+        int64_t loaded_step = CheckpointManager::Load(FLAGS_load_ckpt_path, *model, optimizer.get());
+        if (loaded_step >= 0) {
+            start_step = static_cast<int>(loaded_step);
+            LOG(INFO) << "Rank " << rank.GlobalRank() << ": resumed from step " << start_step;
+        }
+    }
+
+    for (int step = start_step; step < FLAGS_num_iteration + 1; ++step) {
         // Reset precision check counters at start of each iteration for file overwrite
         utils::PrecisionChecker::ResetCounters();
 
@@ -338,6 +354,14 @@ void Train(const nn::parallel::Rank &rank) {
             y = std::make_shared<Tensor>(y->To(device));
 
             lossf = model->TrainStep({x}, {y}, optimizer, loss_fn, dtype);
+        }
+
+        // Save checkpoint (main rank only)
+        if (FLAGS_save_ckpt_every > 0 && !FLAGS_save_ckpt_dir.empty()
+            && (step + 1) % FLAGS_save_ckpt_every == 0 && rank.IsMainRank()) {
+            const std::string ckpt_path
+                = FLAGS_save_ckpt_dir + "/step_" + std::to_string(step + 1) + ".ckpt";
+            CheckpointManager::Save(ckpt_path, *model, *optimizer, step + 1);
         }
 
         if (ddp_world_size > 1) {
