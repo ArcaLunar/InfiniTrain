@@ -482,8 +482,6 @@ void Train(const nn::parallel::Rank &rank) {
 int main(int argc, char *argv[]) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     google::InitGoogleLogging(argv[0]);
-    FLAGS_stderrthreshold = google::GLOG_INFO;
-    FLAGS_logtostderr = 1;
 
     auto precision_config = utils::PrecisionCheckConfig::Parse(FLAGS_precision_check);
     nn::parallel::global::InitAllEnv(FLAGS_nthread_per_process, FLAGS_tensor_parallel, FLAGS_sequence_parallel,
