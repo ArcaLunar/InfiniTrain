@@ -43,7 +43,7 @@ public:
     explicit Module(const std::string &type);
     Module(const Module &) = default;
 
-    virtual ~Module(){};
+    virtual ~Module() {};
 
     const std::string &type() const;
 
@@ -59,6 +59,13 @@ public:
     const Module &module(const std::string &name) const;
 
     std::unordered_map<std::string, std::shared_ptr<Tensor>> StateDict() const;
+
+    /**
+     * @brief Loads parameters from a flat name->tensor map produced by StateDict().
+     *        Each tensor is CopyFrom'd into the matching in-place parameter/buffer.
+     * @param strict If true, FATAL on unknown keys; if false, log a warning and skip.
+     */
+    void LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &sd, bool strict = true);
 
     // operator() calls hooks and Forward
     std::vector<std::shared_ptr<Tensor>> operator()(const std::vector<std::shared_ptr<Tensor>> &input_tensors);

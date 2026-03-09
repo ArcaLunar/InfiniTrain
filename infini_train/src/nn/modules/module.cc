@@ -147,6 +147,24 @@ std::unordered_map<std::string, std::shared_ptr<Tensor>> Module::StateDict() con
     return state;
 }
 
+void Module::LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &sd, bool strict) {
+    // StateDict() returns shared_ptrs to the actual parameter/buffer objects, so
+    // CopyFrom on them modifies the model weights in-place.
+    auto current = StateDict();
+    for (const auto &[key, src] : sd) {
+        auto it = current.find(key);
+        if (it == current.end()) {
+            if (strict) {
+                LOG(FATAL) << "Module::LoadStateDict: unexpected key '" << key << "'";
+            } else {
+                LOG(WARNING) << "Module::LoadStateDict: skipping unexpected key '" << key << "'";
+            }
+            continue;
+        }
+        it->second->CopyFrom(*src);
+    }
+}
+
 std::vector<std::shared_ptr<Tensor>> Module::Forward(const std::vector<std::shared_ptr<Tensor>> &input_tensors) {
     LOG(FATAL) << "Forward function not implemented for this module";
     return {};
