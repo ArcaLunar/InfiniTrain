@@ -294,6 +294,54 @@ void Train(const nn::parallel::Rank &rank) {
         }
     }
 
+    auto save_checkpoint = [&](const std::filesystem::path &save_dir, int64_t global_step, bool prune_step_checkpoints) {
+        const auto ckpt_start = std::chrono::high_resolution_clock::now();
+
+        TrainerState state;
+        state.global_step = global_step;
+        state.best_loss = best_loss;
+        state.last_lr = FLAGS_learning_rate;
+        state.optimizer_type = "Adam";
+        state.checkpoint_format = FLAGS_checkpoint_format;
+        state.ddp_size = ddp_world_size;
+        state.tp_size = tp_world_size;
+        state.sp_size = sp_world_size;
+        state.pp_size = pp_world_size;
+
+        CheckpointOptions options;
+        options.format = FLAGS_checkpoint_format;
+        options.save_optimizer_state = FLAGS_save_optimizer_state;
+        options.model_bin_writer = [&](const nn::Module &, const std::filesystem::path &model_path) {
+            llmc_model->SaveAsLLMC(model_path.string());
+        };
+        Checkpoint::Save(save_dir, *model, *optimizer, state, options);
+
+        const auto ckpt_end = std::chrono::high_resolution_clock::now();
+        const double ckpt_ms = std::chrono::duration<double, std::milli>(ckpt_end - ckpt_start).count();
+
+        if (rank.IsMainRank()) {
+            LOG(INFO) << std::format("Checkpoint saved at: {} ({:.2f} ms)", save_dir.string(), ckpt_ms);
+
+            if (prune_step_checkpoints) {
+                std::vector<std::filesystem::path> ckpts;
+                const auto root = std::filesystem::path(FLAGS_checkpoint_dir);
+                if (std::filesystem::exists(root)) {
+                    for (const auto &entry : std::filesystem::directory_iterator(root)) {
+                        if (entry.is_directory()
+                            && entry.path().filename().string().starts_with("checkpoint_step_")) {
+                            ckpts.push_back(entry.path());
+                        }
+                    }
+                    std::sort(ckpts.begin(), ckpts.end());
+                    while (ckpts.size() > FLAGS_max_checkpoint_keep) {
+                        std::filesystem::remove_all(ckpts.front());
+                        ckpts.erase(ckpts.begin());
+                    }
+                }
+            }
+        }
+    };
+
     for (int step = start_step; step < FLAGS_num_iteration + 1; ++step) {
         // Reset precision check counters at start of each iteration for file overwrite
         utils::PrecisionChecker::ResetCounters();
@@ -387,52 +435,6 @@ void Train(const nn::parallel::Rank &rank) {
 
         best_loss = std::min(best_loss, lossf);
 
-        if (FLAGS_save_steps > 0 && (step + 1) % FLAGS_save_steps == 0) {
-            std::filesystem::path step_dir = std::filesystem::path(FLAGS_checkpoint_dir)
-                                             / std::format("checkpoint_step_{:06d}", step + 1);
-            if (rank.IsParallel()) {
-                step_dir /= std::format("rank_{:06d}", rank.GlobalRank());
-            }
-
-            TrainerState state;
-            state.global_step = step + 1;
-            state.best_loss = best_loss;
-            state.last_lr = FLAGS_learning_rate;
-            state.optimizer_type = "Adam";
-            state.checkpoint_format = FLAGS_checkpoint_format;
-            state.ddp_size = ddp_world_size;
-            state.tp_size = tp_world_size;
-            state.sp_size = sp_world_size;
-            state.pp_size = pp_world_size;
-
-            CheckpointOptions options;
-            options.format = FLAGS_checkpoint_format;
-            options.save_optimizer_state = FLAGS_save_optimizer_state;
-            options.model_bin_writer = [&](const nn::Module &, const std::filesystem::path &model_path) {
-                llmc_model->SaveAsLLMC(model_path.string());
-            };
-            Checkpoint::Save(step_dir, *model, *optimizer, state, options);
-
-            if (rank.IsMainRank()) {
-                LOG(INFO) << "Checkpoint saved at: " << step_dir;
-
-                std::vector<std::filesystem::path> ckpts;
-                const auto root = std::filesystem::path(FLAGS_checkpoint_dir);
-                if (std::filesystem::exists(root)) {
-                    for (const auto &entry : std::filesystem::directory_iterator(root)) {
-                        if (entry.is_directory() && entry.path().filename().string().starts_with("checkpoint_step_")) {
-                            ckpts.push_back(entry.path());
-                        }
-                    }
-                    std::sort(ckpts.begin(), ckpts.end());
-                    while (ckpts.size() > FLAGS_max_checkpoint_keep) {
-                        std::filesystem::remove_all(ckpts.front());
-                        ckpts.erase(ckpts.begin());
-                    }
-                }
-            }
-        }
-
         const auto iter_end = std::chrono::high_resolution_clock::now();
         const double duration_us = std::chrono::duration<double, std::micro>(iter_end - iter_start).count();
         const double tps = FLAGS_total_batch_size / (duration_us / 1e6);
@@ -455,7 +457,22 @@ void Train(const nn::parallel::Rank &rank) {
                 }
             }
         }
+
+        if (FLAGS_save_steps > 0 && (step + 1) % FLAGS_save_steps == 0) {
+            std::filesystem::path step_dir
+                = std::filesystem::path(FLAGS_checkpoint_dir) / std::format("checkpoint_step_{:06d}", step + 1);
+            if (rank.IsParallel()) {
+                step_dir /= std::format("rank_{:06d}", rank.GlobalRank());
+            }
+            save_checkpoint(step_dir, step + 1, true);
+        }
     }
+
+    std::filesystem::path final_dir = std::filesystem::path(FLAGS_checkpoint_dir) / "checkpoint_final";
+    if (rank.IsParallel()) {
+        final_dir /= std::format("rank_{:06d}", rank.GlobalRank());
+    }
+    save_checkpoint(final_dir, FLAGS_num_iteration, false);
 #ifdef PROFILE_MODE
     Profiler::Instance().Report("llama3.report", Profiler::SortBy::DeviceTimePercentage);
     Profiler::Instance().PrintRecords("llama3.records.log");
@@ -465,6 +482,8 @@ void Train(const nn::parallel::Rank &rank) {
 int main(int argc, char *argv[]) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     google::InitGoogleLogging(argv[0]);
+    FLAGS_stderrthreshold = google::GLOG_INFO;
+    FLAGS_logtostderr = 1;
 
     auto precision_config = utils::PrecisionCheckConfig::Parse(FLAGS_precision_check);
     nn::parallel::global::InitAllEnv(FLAGS_nthread_per_process, FLAGS_tensor_parallel, FLAGS_sequence_parallel,
