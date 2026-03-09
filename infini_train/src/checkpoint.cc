@@ -115,11 +115,16 @@ void Checkpoint::Load(const std::filesystem::path &checkpoint_dir, nn::Module *m
 
     const std::string format = InferFormat(checkpoint_dir);
     const auto model_path = checkpoint_dir / (format == "pth" ? "model.pth" : "model.bin");
+    LOG(INFO) << "Loading checkpoint from: " << checkpoint_dir << " (format=" << format << ")";
+    LOG(INFO) << "Loading model state from: " << model_path;
     if (format == "bin" && options.model_bin_loader) {
         const uint32_t magic = PeekMagic(model_path);
         if (magic == kCkptMagic) {
+            LOG(INFO) << "Detected native checkpoint binary model format.";
             model->LoadStateDict(LoadStateDictBinary(model_path));
         } else {
+            LOG(INFO) << "Detected non-native model.bin (magic=" << magic
+                      << "), loading via model_bin_loader callback.";
             options.model_bin_loader(model, model_path);
         }
     } else {
@@ -129,11 +134,22 @@ void Checkpoint::Load(const std::filesystem::path &checkpoint_dir, nn::Module *m
     if (optimizer != nullptr && options.load_optimizer_state) {
         const auto opt_path = checkpoint_dir / (format == "pth" ? "optimizer.pth" : "optimizer.bin");
         if (std::filesystem::exists(opt_path)) {
+            LOG(INFO) << "Loading optimizer state from: " << opt_path;
             optimizer->LoadStateDict(LoadStateDictBinary(opt_path));
+        } else {
+            LOG(INFO) << "Optimizer state file not found, skip loading: " << opt_path;
         }
+    } else if (optimizer == nullptr) {
+        LOG(INFO) << "No optimizer instance provided, skip optimizer state loading.";
+    } else {
+        LOG(INFO) << "CheckpointLoadOptions.load_optimizer_state=false, skip optimizer state loading.";
     }
 
     *state = LoadTrainerState(checkpoint_dir / "trainer_state.json");
+    LOG(INFO) << "Loaded trainer_state: global_step=" << state->global_step << ", best_loss=" << state->best_loss
+              << ", last_lr=" << state->last_lr << ", optimizer_type=" << state->optimizer_type
+              << ", topology(ddp,tp,sp,pp)=(" << state->ddp_size << "," << state->tp_size << ","
+              << state->sp_size << "," << state->pp_size << ")";
 }
 
 void Checkpoint::SaveStateDictBinary(const std::filesystem::path &path,
