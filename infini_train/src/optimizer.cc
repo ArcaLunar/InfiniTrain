@@ -1,5 +1,7 @@
 #include "infini_train/include/optimizer.h"
 
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "infini_train/include/core/device_guard.h"
@@ -31,6 +33,21 @@ void SGD::Step() {
         kernel.Call<void>(param->grad(), -learning_rate_, param);
     }
 }
+
+auto SGD::StateDict() const -> std::unordered_map<std::string, std::shared_ptr<Tensor>> {
+    return {};
+}
+
+auto SGD::LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &state_dict) -> void {
+    // no state to load for SGD
+}
+
+} // namespace optimizers
+
+/**
+ * @brief Implementation of Adam optimizer
+ */
+namespace optimizers {
 
 Adam::Adam(const std::vector<std::shared_ptr<Tensor>> &params, float learning_rate, float beta1, float beta2, float eps)
     : Optimizer(params), t_(0), learning_rate_(learning_rate), beta1_(beta1), beta2_(beta2), eps_(eps) {
@@ -67,5 +84,47 @@ void Adam::Step() {
         kernel.Call<void>(grad, param, m, v, learning_rate_, beta1_, beta2_, eps_, t_);
     }
 }
+
+auto Adam::StateDict() const -> std::unordered_map<std::string, std::shared_ptr<Tensor>> {
+    std::unordered_map<std::string, std::shared_ptr<Tensor>> state_dict;
+
+    for (size_t i = 0; i < m_.size(); ++i) {
+        state_dict["__opt_m_" + std::to_string(i)] = m_[i];
+        state_dict["__opt_v_" + std::to_string(i)] = v_[i];
+    }
+
+    // Store t_ as a 1-element INT64 tensor on CPU
+    auto t_tensor = std::make_shared<Tensor>(std::vector<int64_t>{1}, DataType::kINT64, Device());
+    *static_cast<int64_t *>(t_tensor->DataPtr()) = t_;
+    state_dict["__opt_t__"] = t_tensor;
+
+    return state_dict;
+}
+
+auto Adam::LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &state_dict) -> void {
+    // Restore t_
+    auto t_it = state_dict.find("__opt_t__");
+    if (t_it != state_dict.end()) {
+        Tensor t_cpu = t_it->second->To(Device());
+        auto *impl = core::GetDeviceGuardImpl(t_it->second->GetDevice().type());
+        impl->SynchronizeDevice(t_it->second->GetDevice());
+        t_ = *static_cast<const int64_t *>(t_cpu.DataPtr());
+    }
+
+    // Restore m_ and v_ (CopyFrom handles H2D/D2H as needed)
+    for (size_t i = 0; i < m_.size(); ++i) {
+        auto m_it = state_dict.find("__opt_m_" + std::to_string(i));
+        if (m_it != state_dict.end()) {
+            m_[i]->CopyFrom(*m_it->second);
+        }
+
+        auto v_it = state_dict.find("__opt_v_" + std::to_string(i));
+        if (v_it != state_dict.end()) {
+            v_[i]->CopyFrom(*v_it->second);
+        }
+    }
+}
+
 } // namespace optimizers
+
 } // namespace infini_train

@@ -1,5 +1,7 @@
 #include "infini_train/include/nn/parallel/ddp/distributed_optimizer.h"
 
+#include <unordered_map>
+
 #include "glog/logging.h"
 
 #include "infini_train/include/nn/parallel/ddp/distributed_data_parallel.h"
@@ -126,6 +128,16 @@ void DistributedOptimizer::Step() {
     StartParamSync(/*force_sync=*/false);
     // FIXME(zbl): Call sync before param is actually used in next step
     FinishParamSync(/*skip_next_bucket_dispatch=*/true);
+}
+
+std::unordered_map<std::string, std::shared_ptr<Tensor>> DistributedOptimizer::StateDict() const {
+    CHECK(base_optimizer_) << "DistributedOptimizer: base optimizer is null.";
+    return base_optimizer_->StateDict();
+}
+
+void DistributedOptimizer::LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &state_dict) {
+    CHECK(base_optimizer_) << "DistributedOptimizer: base optimizer is null.";
+    base_optimizer_->LoadStateDict(state_dict);
 }
 
 } // namespace infini_train::nn::parallel

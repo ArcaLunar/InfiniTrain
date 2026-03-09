@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace infini_train {
@@ -21,6 +23,17 @@ public:
 
     virtual void Step() = 0;
 
+    /**
+     * @brief Returns a state dictionary containing the optimizer's internal state.
+     */
+    virtual std::unordered_map<std::string, std::shared_ptr<Tensor>> StateDict() const { return {}; }
+
+    /**
+     * @brief Loads the optimizer's internal state from a state dictionary.
+     * @param state_dict The state dictionary to load from.
+     */
+    virtual void LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &state_dict) {}
+
 protected:
     std::vector<std::shared_ptr<Tensor>> params_;
 };
@@ -31,6 +44,10 @@ public:
     SGD(const std::vector<std::shared_ptr<Tensor>> &params, float learning_rate);
 
     void Step() override;
+
+    auto StateDict() const -> std::unordered_map<std::string, std::shared_ptr<Tensor>> override;
+
+    auto LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &state_dict) -> void override;
 
     static OptimizerCreator Create(float learning_rate) {
         return [learning_rate](const std::vector<std::shared_ptr<Tensor>> &params) {
@@ -49,6 +66,10 @@ public:
 
     void Step() override;
 
+    auto StateDict() const -> std::unordered_map<std::string, std::shared_ptr<Tensor>> override;
+
+    auto LoadStateDict(const std::unordered_map<std::string, std::shared_ptr<Tensor>> &state_dict) -> void override;
+
     static OptimizerCreator Create(float learning_rate = 1e-3, float beta1 = 0.9, float beta2 = 0.999,
                                    float eps = 1e-8) {
         return [=](const std::vector<std::shared_ptr<Tensor>> &params) {
@@ -59,9 +80,9 @@ public:
 private:
     int64_t t_;
     const float learning_rate_;
-    const float beta1_;
-    const float beta2_;
-    const float eps_;
+    float beta1_;
+    float beta2_;
+    float eps_;
     std::vector<std::shared_ptr<Tensor>> m_;
     std::vector<std::shared_ptr<Tensor>> v_;
 };
