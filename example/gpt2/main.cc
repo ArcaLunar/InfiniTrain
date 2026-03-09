@@ -1,8 +1,11 @@
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -10,6 +13,7 @@
 #include "glog/logging.h"
 
 #include "infini_train/include/autocast.h"
+#include "infini_train/include/checkpoint.h"
 #include "infini_train/include/core/device_guard.h"
 #include "infini_train/include/dataloader.h"
 #include "infini_train/include/device.h"
@@ -74,6 +78,12 @@ DEFINE_uint32(virtual_pipeline_parallel, 1, "Number of chunks in PP stage.");
 
 // precision
 DEFINE_string(dtype, "float32", "precision used in training (float32/bfloat16)");
+DEFINE_uint32(save_steps, 0, "save checkpoint every N steps; 0 disables saving");
+DEFINE_string(resume_from, "", "checkpoint directory to resume from");
+DEFINE_string(checkpoint_dir, "./checkpoints", "root directory used to store checkpoints");
+DEFINE_uint32(max_checkpoint_keep, 3, "max number of checkpoint steps to keep");
+DEFINE_bool(save_optimizer_state, true, "whether optimizer state is persisted in checkpoints");
+DEFINE_string(checkpoint_format, "bin", "checkpoint format: bin|pth");
 // precision check
 DEFINE_string(
     precision_check, "",
@@ -187,6 +197,8 @@ void Train(const nn::parallel::Rank &rank) {
     } else {
         model = GPT2::FromPretrained(kStrToModelType.at(FLAGS_model));
     }
+    auto llmc_model = std::dynamic_pointer_cast<GPT2>(model);
+    CHECK(llmc_model != nullptr) << "Failed to cast model to GPT2 for LLMC checkpoint I/O.";
 
     model->To(device);
 
@@ -277,9 +289,36 @@ void Train(const nn::parallel::Rank &rank) {
 
     auto impl = core::GetDeviceGuardImpl(device.type());
 
+    int start_step = 0;
+    float best_loss = std::numeric_limits<float>::infinity();
+    if (!FLAGS_resume_from.empty()) {
+        std::filesystem::path resume_dir = FLAGS_resume_from;
+        if (rank.IsParallel()) {
+            const auto rank_dir = resume_dir / std::format("rank_{:06d}", rank.GlobalRank());
+            if (std::filesystem::exists(rank_dir)) {
+                resume_dir = rank_dir;
+            }
+        }
+
+        TrainerState state;
+        CheckpointLoadOptions load_options;
+        load_options.load_optimizer_state = true;
+        load_options.model_bin_loader = [](nn::Module *target_model, const std::filesystem::path &model_path) {
+            auto loaded_model = GPT2::FromLLMC(model_path.string());
+            target_model->LoadStateDict(loaded_model->StateDict());
+        };
+        Checkpoint::Load(resume_dir, model.get(), optimizer.get(), &state, load_options);
+        start_step = static_cast<int>(state.global_step);
+        best_loss = state.best_loss;
+        if (rank.IsMainRank()) {
+            LOG(INFO) << std::format("Resume training from step {} with best_loss {:.6f} and last_lr {:.3e}",
+                                     state.global_step, state.best_loss, state.last_lr);
+        }
+    }
+
     LOG(INFO) << "start training";
 
-    for (int step = 0; step < FLAGS_num_iteration + 1; ++step) {
+    for (int step = start_step; step < FLAGS_num_iteration + 1; ++step) {
         // Reset precision check counters at start of each iteration for file overwrite
         utils::PrecisionChecker::ResetCounters();
 
@@ -368,6 +407,53 @@ void Train(const nn::parallel::Rank &rank) {
             auto lossf_tensor = std::make_shared<Tensor>(&lossf, std::vector<int64_t>{}, DataType::kFLOAT32, device);
             function::AllReduce(lossf_tensor, function::ReduceOpType::kAvg, ddp_pg);
             lossf = static_cast<const float *>(lossf_tensor->To(Device()).DataPtr())[0];
+        }
+
+        best_loss = std::min(best_loss, lossf);
+
+        if (FLAGS_save_steps > 0 && (step + 1) % FLAGS_save_steps == 0) {
+            std::filesystem::path step_dir = std::filesystem::path(FLAGS_checkpoint_dir)
+                                             / std::format("checkpoint_step_{:06d}", step + 1);
+            if (rank.IsParallel()) {
+                step_dir /= std::format("rank_{:06d}", rank.GlobalRank());
+            }
+
+            TrainerState state;
+            state.global_step = step + 1;
+            state.best_loss = best_loss;
+            state.last_lr = FLAGS_learning_rate;
+            state.optimizer_type = "SGD";
+            state.checkpoint_format = FLAGS_checkpoint_format;
+            state.ddp_size = ddp_world_size;
+            state.tp_size = tp_world_size;
+            state.sp_size = sp_world_size;
+            state.pp_size = pp_world_size;
+
+            CheckpointOptions options;
+            options.format = FLAGS_checkpoint_format;
+            options.save_optimizer_state = FLAGS_save_optimizer_state;
+            options.model_bin_writer =
+                [&](const nn::Module &, const std::filesystem::path &model_path) { llmc_model->SaveAsLLMC(model_path.string()); };
+            Checkpoint::Save(step_dir, *model, *optimizer, state, options);
+
+            if (rank.IsMainRank()) {
+                LOG(INFO) << "Checkpoint saved at: " << step_dir;
+
+                std::vector<std::filesystem::path> ckpts;
+                const auto root = std::filesystem::path(FLAGS_checkpoint_dir);
+                if (std::filesystem::exists(root)) {
+                    for (const auto &entry : std::filesystem::directory_iterator(root)) {
+                        if (entry.is_directory() && entry.path().filename().string().starts_with("checkpoint_step_")) {
+                            ckpts.push_back(entry.path());
+                        }
+                    }
+                    std::sort(ckpts.begin(), ckpts.end());
+                    while (ckpts.size() > FLAGS_max_checkpoint_keep) {
+                        std::filesystem::remove_all(ckpts.front());
+                        ckpts.erase(ckpts.begin());
+                    }
+                }
+            }
         }
 
         const auto iter_end = std::chrono::high_resolution_clock::now();
