@@ -30,7 +30,7 @@
             "args": {
                 "num_iteration": 50,
                 "save_steps": 10,
-                "resume_from": "../ckpt/no_resume/iter_20.pt",
+                "resume_from": "../ckpt/no_resume/checkpoint_step_000030",
                 "checkpoint_dir": "../ckpt/resume"
             }
         }
