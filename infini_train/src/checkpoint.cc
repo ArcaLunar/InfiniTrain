@@ -149,8 +149,10 @@ void Checkpoint::Load(const std::filesystem::path &checkpoint_dir, nn::Module *m
     }
 
     *state = LoadTrainerState(checkpoint_dir / "trainer_state.json");
-    LOG(ERROR) << "[CKPT] Load done: global_step=" << state->global_step << ", best_loss=" << state->best_loss
-               << ", last_lr=" << state->last_lr << ", optimizer_type=" << state->optimizer_type
+    LOG(ERROR) << "[CKPT] Load done: global_step=" << state->global_step << ", data_batch_idx="
+               << state->data_batch_idx << ", data_batch_stride=" << state->data_batch_stride
+               << ", best_loss=" << state->best_loss << ", last_lr=" << state->last_lr
+               << ", optimizer_type=" << state->optimizer_type
                << ", topology(ddp,tp,sp,pp)=(" << state->ddp_size << "," << state->tp_size << ","
                << state->sp_size << "," << state->pp_size << ")";
 }
@@ -233,6 +235,8 @@ void Checkpoint::SaveTrainerState(const std::filesystem::path &path, const Train
     CHECK(ofs.is_open()) << "Failed to open trainer state file: " << path;
     ofs << "{\n";
     ofs << "  \"global_step\": " << state.global_step << ",\n";
+    ofs << "  \"data_batch_idx\": " << state.data_batch_idx << ",\n";
+    ofs << "  \"data_batch_stride\": " << state.data_batch_stride << ",\n";
     ofs << "  \"best_loss\": " << state.best_loss << ",\n";
     ofs << "  \"last_lr\": " << state.last_lr << ",\n";
     ofs << "  \"optimizer_type\": \"" << state.optimizer_type << "\",\n";
@@ -251,6 +255,8 @@ TrainerState Checkpoint::LoadTrainerState(const std::filesystem::path &path) {
 
     TrainerState state;
     state.global_step = ExtractNumberField<int64_t>(content, "global_step", 0);
+    state.data_batch_idx = ExtractNumberField<int64_t>(content, "data_batch_idx", 0);
+    state.data_batch_stride = ExtractNumberField<int64_t>(content, "data_batch_stride", 1);
     state.best_loss = ExtractNumberField<float>(content, "best_loss", std::numeric_limits<float>::infinity());
     state.last_lr = ExtractNumberField<double>(content, "last_lr", 0.0);
     state.optimizer_type = ExtractStringField(content, "optimizer_type", "unknown");

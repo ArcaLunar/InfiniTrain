@@ -16,6 +16,8 @@ class Module;
 
 struct TrainerState {
     int64_t global_step = 0;
+    int64_t data_batch_idx = 0;
+    int64_t data_batch_stride = 1;
     float best_loss = 0.0f;
     double last_lr = 0.0;
     std::string optimizer_type = "unknown";

@@ -280,6 +280,7 @@ void Train(const nn::parallel::Rank &rank) {
     }
 
     auto train_iter = train_loader.begin();
+    size_t saved_data_batch_idx = train_iter.BatchIndex();
     std::shared_ptr<nn::Module> loss_fn
         = (tp_world_size > 1) ? std::static_pointer_cast<nn::Module>(
               std::make_shared<VocabParallelCrossEntropyLoss>(model_config.original_vocab_size))
@@ -310,9 +311,17 @@ void Train(const nn::parallel::Rank &rank) {
         Checkpoint::Load(resume_dir, model.get(), optimizer.get(), &state, load_options);
         start_step = static_cast<int>(state.global_step);
         best_loss = state.best_loss;
+        if (state.data_batch_stride != static_cast<int64_t>(ddp_world_size) && rank.IsMainRank()) {
+            LOG(WARNING) << std::format("Checkpoint data_batch_stride {} mismatches current ddp_world_size {}. "
+                                        "Proceeding with recorded data_batch_idx {}.",
+                                        state.data_batch_stride, ddp_world_size, state.data_batch_idx);
+        }
+        saved_data_batch_idx = static_cast<size_t>(std::max<int64_t>(state.data_batch_idx, 0));
+        train_iter = train_loader.IteratorAtBatchIndex(saved_data_batch_idx);
         if (rank.IsMainRank()) {
-            LOG(INFO) << std::format("Resume training from step {} with best_loss {:.6f} and last_lr {:.3e}",
-                                     state.global_step, state.best_loss, state.last_lr);
+            LOG(INFO) << std::format(
+                "Resume training from step {} with best_loss {:.6f}, last_lr {:.3e}, data_batch_idx {}",
+                state.global_step, state.best_loss, state.last_lr, state.data_batch_idx);
         }
     }
 
@@ -323,6 +332,8 @@ void Train(const nn::parallel::Rank &rank) {
 
         TrainerState state;
         state.global_step = global_step;
+        state.data_batch_idx = saved_data_batch_idx;
+        state.data_batch_stride = ddp_world_size;
         state.best_loss = best_loss;
         state.last_lr = FLAGS_learning_rate;
         state.optimizer_type = "SGD";
@@ -416,6 +427,7 @@ void Train(const nn::parallel::Rank &rank) {
                 // if we are trying to overfit a single batch, we reset the loader here by commenting out the line below
                 // TODO(dcj): support dataloader.reset() later
                 ++train_iter;
+                saved_data_batch_idx = train_iter.BatchIndex();
                 x = std::make_shared<Tensor>(x->To(device));
                 y = std::make_shared<Tensor>(y->To(device));
 
@@ -445,6 +457,7 @@ void Train(const nn::parallel::Rank &rank) {
             // if we are trying to overfit a single batch, we reset the loader here by commenting out the line below
             // TODO(dcj): support dataloader.reset() later
             ++train_iter;
+            saved_data_batch_idx = train_iter.BatchIndex();
             x = std::make_shared<Tensor>(x->To(device));
             y = std::make_shared<Tensor>(y->To(device));
 
