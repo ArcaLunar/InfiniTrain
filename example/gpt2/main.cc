@@ -84,6 +84,8 @@ DEFINE_string(checkpoint_dir, "./checkpoints", "root directory used to store che
 DEFINE_uint32(max_checkpoint_keep, 3, "max number of checkpoint steps to keep");
 DEFINE_bool(save_optimizer_state, true, "whether optimizer state is persisted in checkpoints");
 DEFINE_string(checkpoint_format, "bin", "checkpoint format: bin|pth");
+DEFINE_bool(use_llmc_checkpoint_io, false,
+            "whether to use GPT2 LLMC model.bin callback for checkpoint save/load when format=bin");
 // precision check
 DEFINE_string(
     precision_check, "",
@@ -304,10 +306,12 @@ void Train(const nn::parallel::Rank &rank) {
         TrainerState state;
         CheckpointLoadOptions load_options;
         load_options.load_optimizer_state = true;
-        load_options.model_bin_loader = [](nn::Module *target_model, const std::filesystem::path &model_path) {
-            auto loaded_model = GPT2::FromLLMC(model_path.string());
-            target_model->LoadStateDict(loaded_model->StateDict());
-        };
+        if (FLAGS_use_llmc_checkpoint_io) {
+            load_options.model_bin_loader = [](nn::Module *target_model, const std::filesystem::path &model_path) {
+                auto loaded_model = GPT2::FromLLMC(model_path.string());
+                target_model->LoadStateDict(loaded_model->StateDict());
+            };
+        }
         Checkpoint::Load(resume_dir, model.get(), optimizer.get(), &state, load_options);
         start_step = static_cast<int>(state.global_step);
         best_loss = state.best_loss;
@@ -322,6 +326,8 @@ void Train(const nn::parallel::Rank &rank) {
             LOG(INFO) << std::format(
                 "Resume training from step {} with best_loss {:.6f}, last_lr {:.3e}, data_batch_idx {}",
                 state.global_step, state.best_loss, state.last_lr, state.data_batch_idx);
+            LOG(INFO) << std::format("Checkpoint model I/O mode during resume: {}",
+                                     FLAGS_use_llmc_checkpoint_io ? "llmc-callback" : "native-state-dict");
         }
     }
 
@@ -346,9 +352,11 @@ void Train(const nn::parallel::Rank &rank) {
         CheckpointOptions options;
         options.format = FLAGS_checkpoint_format;
         options.save_optimizer_state = FLAGS_save_optimizer_state;
-        options.model_bin_writer = [&](const nn::Module &, const std::filesystem::path &model_path) {
-            llmc_model->SaveAsLLMC(model_path.string());
-        };
+        if (FLAGS_use_llmc_checkpoint_io) {
+            options.model_bin_writer = [&](const nn::Module &, const std::filesystem::path &model_path) {
+                llmc_model->SaveAsLLMC(model_path.string());
+            };
+        }
         Checkpoint::Save(save_dir, *model, *optimizer, state, options);
 
         const auto ckpt_end = std::chrono::high_resolution_clock::now();
